@@ -1,0 +1,21 @@
+version: "3.9"
+
+services:
+  vlm-api:
+    build: .
+    container_name: vlm-api
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./models:/root/.cache/huggingface   # cache downloaded model weights
+    environment:
+      - TRANSFORMERS_CACHE=/root/.cache/huggingface
+      - HF_HOME=/root/.cache/huggingface
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
