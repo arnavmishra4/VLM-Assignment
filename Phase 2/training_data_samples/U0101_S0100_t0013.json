@@ -1,0 +1,86 @@
+{
+  "clip_id": "U0101_S0100_t0013",
+  "frame_paths": [
+    "frames/U0101/S0100/frame_000271.jpg",
+    "frames/U0101/S0100/frame_000286.jpg",
+    "frames/U0101/S0100/frame_000301.jpg",
+    "frames/U0101/S0100/frame_000316.jpg",
+    "frames/U0101/S0100/frame_000331.jpg",
+    "frames/U0101/S0100/frame_000346.jpg",
+    "frames/U0101/S0100/frame_000361.jpg",
+    "frames/U0101/S0100/frame_000376.jpg"
+  ],
+  "clip_meta": {
+    "subject": "U0101",
+    "session": "S0100",
+    "clip_start_abs": 270,
+    "clip_end_abs": 395,
+    "boundary_abs": 332,
+    "dominant_op": "Inner Packing",
+    "prev_op": "Box Setup",
+    "next_op": "Put Items",
+    "data_source": "openpack-operations CSV (real annotations)",
+    "frame_sampling": "entropy-keyframe (uniform locally; full entropy on Kaggle with RGB)"
+  },
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are an expert logistics analyst watching warehouse packaging operations. You will be shown 8 frames entropy-sampled from a 5-second video clip at 25fps (336x336). Frames are selected to capture key visual moments including operation boundaries.\n\nIdentify the dominant packaging operation, its temporal boundaries (0-based frame indices within the 8 sampled frames), and predict the next operation in the workflow.\n\nRespond ONLY with valid JSON:\n{\n  \"clip_id\": \"<string>\",\n  \"dominant_operation\": \"<one of: Box Setup|Inner Packing|Tape|Put Items|Pack|Wrap|Label|Final Check|Idle|Unknown>\",\n  \"temporal_segment\": {\"start_frame\": <int 0-7>, \"end_frame\": <int 0-7>},\n  \"anticipated_next_operation\": \"<same 10 classes>\",\n  \"confidence\": <float 0.0-1.0>\n}"
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "image",
+          "path": "frames/U0101/S0100/frame_000271.jpg"
+        },
+        {
+          "type": "image",
+          "path": "frames/U0101/S0100/frame_000286.jpg"
+        },
+        {
+          "type": "image",
+          "path": "frames/U0101/S0100/frame_000301.jpg"
+        },
+        {
+          "type": "image",
+          "path": "frames/U0101/S0100/frame_000316.jpg"
+        },
+        {
+          "type": "image",
+          "path": "frames/U0101/S0100/frame_000331.jpg"
+        },
+        {
+          "type": "image",
+          "path": "frames/U0101/S0100/frame_000346.jpg"
+        },
+        {
+          "type": "image",
+          "path": "frames/U0101/S0100/frame_000361.jpg"
+        },
+        {
+          "type": "image",
+          "path": "frames/U0101/S0100/frame_000376.jpg"
+        },
+        {
+          "type": "text",
+          "text": "Clip ID: U0101_S0100_t0013\nAnalyze these entropy-sampled frames from a warehouse packaging video. Identify the dominant operation, temporal boundaries (0-based within these 8 frames), and predict the next operation."
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": "{\n  \"clip_id\": \"U0101_S0100_t0013\",\n  \"dominant_operation\": \"Inner Packing\",\n  \"temporal_segment\": {\n    \"start_frame\": 5,\n    \"end_frame\": 7\n  },\n  \"anticipated_next_operation\": \"Put Items\",\n  \"confidence\": 0.9\n}"
+    }
+  ],
+  "target": {
+    "clip_id": "U0101_S0100_t0013",
+    "dominant_operation": "Inner Packing",
+    "temporal_segment": {
+      "start_frame": 5,
+      "end_frame": 7
+    },
+    "anticipated_next_operation": "Put Items",
+    "confidence": 0.9
+  }
+}
