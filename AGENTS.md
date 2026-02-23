@@ -47,3 +47,14 @@
 - Fixed frame path resolution for nested timestamp-based folder structure in sample data
 **Time saved:** ~3 hours
 **Time of this prompt:** 22:24
+
+
+## Phase 3 — Dataset Research [Hour 12]
+
+**Tool:** ChatGPT Deep Research
+**Request:** Find any publicly available pre-processed or pre-clipped versions of the OpenPack dataset with RGB frames and operation annotations, ready for VLM fine-tuning without downloading the full 400GB+ raw data. Searched HuggingFace Datasets, Kaggle Datasets, Zenodo, GitHub, and academic paper supplementary materials.
+**Output:** No usable pre-processed OpenPack RGB dataset found anywhere — HuggingFace: no entries | Kaggle: no entries | Zenodo: annotations only, RGB on separate Google Drive | Google Drive: download quota exceeded | GitHub openpack-dataset: U0209 sample only, 15 frames, no full video
+**Accepted:** Research conclusion — full RGB inaccessible within free-tier constraints
+**Modified:** N/A — research task, no code output
+**Time saved:** None (wasted 2 hours figuring out the dataset issue , decided to move on with Sample dataset creating sample scripts while trying to locally download one big file that i can clip and use for training)
+**Time of this prompt:** 03:48
