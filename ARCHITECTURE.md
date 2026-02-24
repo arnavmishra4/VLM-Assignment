@@ -102,3 +102,18 @@ Had the full dataset been available, the most likely confusion would be between 
 - Pre-extract all RGB frames to JPEG at 336×336 using ffmpeg before uploading to Kaggle, reducing 48GB of video to ~4–6GB of images — within Kaggle's 20GB dataset limit
 - Or mount a GCS/S3 bucket with the full RGB files to a Vertex AI training VM
 - The `data_pipeline.py` entropy sampling and boundary extraction logic is correct and would run without modification once frames are accessible at the expected paths (`frames/{subject}/{session}/frame_{idx:06d}.jpg`)
+
+### Best Practices Compliance
+
+WebDataset tarball sharding was not implemented — with 20 training 
+samples the folder-of-JSONs loader has negligible I/O overhead. 
+This would be the first optimization when scaling to full OpenPack data.
+
+decord was not used for frame extraction — the 48GB video files were 
+never accessible, so frames were pre-extracted externally. decord would 
+be used in the full pipeline to pull frames directly from Kinect RGB videos.
+
+All three gradient checkpointing flags were enabled:
+`gradient_checkpointing=True` in TrainingArguments, plus 
+`model.gradient_checkpointing_enable()` and 
+`model.enable_input_require_grads()` called before LoRA wrapping.
