@@ -2,6 +2,7 @@ import os
 import json
 import re
 from pathlib import Path
+from collections import defaultdict
 
 import torch
 import numpy as np
@@ -36,7 +37,11 @@ PROCEDURAL_NEXT = {
 }
 
 MODEL_ID   = "Qwen/Qwen2-VL-2B-Instruct"
-BATCH_SIZE = 2   # start at 2; increase to 4 if VRAM allows
+
+# FIX 1: Use BATCH_SIZE=1 to avoid image-ordering bugs in batched inference.
+# Qwen2-VL's processor does not reliably handle a flat list of images from
+# multiple samples — each sample's images get misaligned with its text prompt.
+BATCH_SIZE = 1
 
 SYSTEM_PROMPT = """You are an expert warehouse operations analyst.
 Given video frames from a 5-second packaging clip, respond ONLY with valid JSON:
@@ -55,6 +60,14 @@ BNB_CONFIG = BitsAndBytesConfig(
     bnb_4bit_compute_dtype=torch.bfloat16,
     bnb_4bit_use_double_quant=True,
 )
+
+COLORS = {
+    "base":      "#6c757d",
+    "finetuned": "#0d6efd",
+    "good":      "#198754",
+    "bad":       "#dc3545",
+    "accent":    "#fd7e14",
+}
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -84,16 +97,30 @@ def load_finetuned_model(checkpoint_path: str):
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# INFERENCE  (batched)
+# INFERENCE  (single-sample, avoiding batching image-alignment bug)
 # ──────────────────────────────────────────────────────────────────────────────
 def build_messages(pair: dict) -> list:
+    # FIX 3: Check that frame files actually exist before building messages
+    valid_paths = []
+    for fp in pair["sampled_frame_paths"]:
+        p = Path(fp)
+        if p.exists():
+            valid_paths.append(str(p.resolve()))
+        else:
+            print(f"  ⚠️  Frame not found, skipping: {fp}")
+
+    if not valid_paths:
+        raise FileNotFoundError(
+            f"No valid frame paths found for clip {pair['clip_id']}. "
+            f"Checked: {pair['sampled_frame_paths']}"
+        )
+
     return [
         {"role": "system", "content": SYSTEM_PROMPT},
         {
             "role": "user",
             "content": [
-                *[{"type": "image", "image": f"file://{Path(fp).resolve()}"}
-                  for fp in pair["sampled_frame_paths"]],
+                *[{"type": "image", "image": f"file://{fp}"} for fp in valid_paths],
                 {"type": "text",
                  "text": f"Clip ID: {pair['clip_id']}\nAnalyze these frames."},
             ],
@@ -101,27 +128,22 @@ def build_messages(pair: dict) -> list:
     ]
 
 
-def run_batch_inference(model, processor, pairs: list) -> list:
+def run_single_inference(model, processor, pair: dict) -> dict:
     """
-    Run inference on a batch of pairs.
-    Returns list of parsed dicts in same order as pairs.
+    Run inference on a single pair.
+    Returns parsed dict.
     """
-    all_messages = [build_messages(p) for p in pairs]
+    messages = build_messages(pair)
 
-    texts = [
-        processor.apply_chat_template(m, tokenize=False, add_generation_prompt=True)
-        for m in all_messages
-    ]
+    text = processor.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=True
+    )
 
-    # Collect all images in order — process_vision_info returns per-message images
-    all_images = []
-    for m in all_messages:
-        imgs, _ = process_vision_info(m)
-        all_images.extend(imgs)
+    images, _ = process_vision_info(messages)
 
     inputs = processor(
-        text=texts,
-        images=all_images,
+        text=[text],
+        images=images,
         padding=True,
         return_tensors="pt",
     ).to(model.device)
@@ -129,29 +151,46 @@ def run_batch_inference(model, processor, pairs: list) -> list:
     with torch.no_grad():
         output_ids = model.generate(
             **inputs,
-            max_new_tokens=80,      # JSON response ≈ 80 tokens max
+            max_new_tokens=120,
             do_sample=False,
             temperature=None,
             top_p=None,
         )
 
-    input_len = inputs["input_ids"].shape[1]
-    results = []
-    for out in output_ids:
-        raw = processor.decode(out[input_len:], skip_special_tokens=True)
-        results.append(parse_output(raw))
+    # FIX 2: Use per-sample true input length via attention_mask.sum()
+    # The original code used inputs["input_ids"].shape[1] (padded batch length),
+    # which slices the wrong offset when padding is present.
+    true_input_len = int(inputs["attention_mask"][0].sum().item())
+    raw = processor.decode(
+        output_ids[0][true_input_len:], skip_special_tokens=True
+    )
 
-    return results
+    # FIX 4: Log raw output so failures are visible
+    print(f"    RAW OUTPUT [{pair['clip_id']}]: {repr(raw[:300])}")
+
+    return parse_output(raw)
 
 
 def parse_output(raw: str) -> dict:
-    """Extract JSON from model output, return safe defaults on failure."""
-    try:
-        match = re.search(r'\{.*\}', raw, re.DOTALL)
-        if match:
-            return json.loads(match.group())
-    except Exception:
-        pass
+    """
+    Extract JSON from model output.
+
+    FIX 5: Handle ```json ... ``` fences as well as bare JSON.
+    Returns safe defaults on failure.
+    """
+    # Strip markdown code fences if present
+    cleaned = re.sub(r"```(?:json)?", "", raw).strip()
+
+    # Try to find a JSON object
+    for candidate in [cleaned, raw]:
+        try:
+            match = re.search(r'\{.*\}', candidate, re.DOTALL)
+            if match:
+                return json.loads(match.group())
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    print(f"    ⚠️  Could not parse JSON from output: {repr(raw[:200])}")
     return {
         "dominant_operation":         "Unknown",
         "temporal_segment":           {"start_frame": 0, "end_frame": 0},
@@ -178,37 +217,31 @@ def compute_tiou(pred_seg: dict, gt_seg: dict) -> float:
 
 
 def evaluate_model(model, processor, pairs: list) -> dict:
-    """Batched evaluation loop — returns per-clip results + aggregate metrics."""
-    results   = []
-    all_preds = []
+    """Single-sample evaluation loop — returns per-clip results + aggregate metrics."""
+    results = []
 
-    # Run batched inference
-    for i in range(0, len(pairs), BATCH_SIZE):
-        batch = pairs[i:i + BATCH_SIZE]
-        print(f"  Inferring clips {i+1}–{min(i+BATCH_SIZE, len(pairs))} / {len(pairs)} …",
-              flush=True)
+    for i, pair in enumerate(pairs):
+        print(f"  Inferring clip {i+1}/{len(pairs)}: {pair['clip_id']} …", flush=True)
         try:
-            preds = run_batch_inference(model, processor, batch)
+            pred = run_single_inference(model, processor, pair)
+        except FileNotFoundError as e:
+            print(f"  ❌ Skipping clip — {e}")
+            pred = parse_output("")
         except RuntimeError as e:
-            # OOM fallback — run one by one
-            print(f"  ⚠️  Batch OOM, falling back to single inference: {e}")
-            preds = []
-            for pair in batch:
-                try:
-                    p = run_batch_inference(model, processor, [pair])
-                    preds.extend(p)
-                except Exception:
-                    preds.append(parse_output(""))
-        all_preds.extend(preds)
+            print(f"  ❌ RuntimeError on clip {pair['clip_id']}: {e}")
+            pred = parse_output("")
 
-    # Score each clip
-    for pair, pred in zip(pairs, all_preds):
-        target = json.loads(pair["target_json"]) if isinstance(pair["target_json"], str) \
-                 else pair["target_json"]
+        target = (
+            json.loads(pair["target_json"])
+            if isinstance(pair["target_json"], str)
+            else pair["target_json"]
+        )
 
         gt_op   = target.get("dominant_operation", "Unknown")
-        gt_next = target.get("anticipated_next_operation",
-                             PROCEDURAL_NEXT.get(gt_op, "Unknown"))
+        gt_next = target.get(
+            "anticipated_next_operation",
+            PROCEDURAL_NEXT.get(gt_op, "Unknown")
+        )
         gt_seg  = target.get("temporal_segment", {"start_frame": 0, "end_frame": 125})
 
         pred_op   = pred.get("dominant_operation", "Unknown")
@@ -219,9 +252,16 @@ def evaluate_model(model, processor, pairs: list) -> dict:
         oca_ok = int(pred_op.strip().lower() == gt_op.strip().lower())
         aa_ok  = int(pred_next.strip().lower() == gt_next.strip().lower())
 
-        status = "✅" if (oca_ok and tiou >= 0.5 and aa_ok) else \
-                 "⚠️"  if (oca_ok or  tiou >= 0.5 or  aa_ok) else "❌"
-        print(f"  {status}  [{pair['clip_id']}]  OCA={oca_ok}  tIoU={tiou:.2f}  AA={aa_ok}")
+        status = (
+            "✅" if (oca_ok and tiou >= 0.5 and aa_ok) else
+            "⚠️"  if (oca_ok or  tiou >= 0.5 or  aa_ok) else
+            "❌"
+        )
+        print(
+            f"  {status}  [{pair['clip_id']}]  "
+            f"GT='{gt_op}' PRED='{pred_op}'  "
+            f"OCA={oca_ok}  tIoU={tiou:.2f}  AA={aa_ok}"
+        )
 
         results.append({
             "clip_id":    pair["clip_id"],
@@ -234,9 +274,9 @@ def evaluate_model(model, processor, pairs: list) -> dict:
             "confidence": pred.get("confidence", 0.0),
         })
 
-    oca        = np.mean([r["oca_ok"]        for r in results])
-    tiou_score = np.mean([r["tiou"] >= 0.5   for r in results])
-    aa         = np.mean([r["aa_ok"]         for r in results])
+    oca        = np.mean([r["oca_ok"]       for r in results]) if results else 0.0
+    tiou_score = np.mean([r["tiou"] >= 0.5  for r in results]) if results else 0.0
+    aa         = np.mean([r["aa_ok"]        for r in results]) if results else 0.0
 
     return {
         "aggregate": {
@@ -251,22 +291,15 @@ def evaluate_model(model, processor, pairs: list) -> dict:
 # ──────────────────────────────────────────────────────────────────────────────
 # VISUALISATION
 # ──────────────────────────────────────────────────────────────────────────────
-COLORS = {
-    "base":      "#6c757d",
-    "finetuned": "#0d6efd",
-    "good":      "#198754",
-    "bad":       "#dc3545",
-    "accent":    "#fd7e14",
-}
-
-
 def plot_comparison(base_res: dict, ft_res: dict, out_dir: Path):
     out_dir.mkdir(parents=True, exist_ok=True)
 
     metrics      = ["OCA", "tIoU@0.5", "AA@1"]
-    descriptions = ["Operation Classification\nAccuracy",
-                    "Temporal IoU\n(≥0.5 threshold)",
-                    "Anticipation Accuracy\n(next operation)"]
+    descriptions = [
+        "Operation Classification\nAccuracy",
+        "Temporal IoU\n(≥0.5 threshold)",
+        "Anticipation Accuracy\n(next operation)",
+    ]
     b_vals = [base_res["aggregate"][m] for m in metrics]
     f_vals = [ft_res["aggregate"][m]   for m in metrics]
 
@@ -274,21 +307,27 @@ def plot_comparison(base_res: dict, ft_res: dict, out_dir: Path):
     fig, axes = plt.subplots(1, 3, figsize=(14, 5))
     fig.suptitle("Base vs Fine-Tuned — Aggregate Metrics", fontsize=15, fontweight="bold")
     for ax, metric, desc, bv, fv in zip(axes, metrics, descriptions, b_vals, f_vals):
-        bars = ax.bar(["Base", "Fine-tuned"], [bv, fv],
-                      color=[COLORS["base"], COLORS["finetuned"]],
-                      width=0.45, edgecolor="white", linewidth=1.5)
+        bars = ax.bar(
+            ["Base", "Fine-tuned"], [bv, fv],
+            color=[COLORS["base"], COLORS["finetuned"]],
+            width=0.45, edgecolor="white", linewidth=1.5,
+        )
         ax.set_ylim(0, 1.0)
         ax.set_title(f"{metric}\n{desc}", fontsize=10)
         ax.set_ylabel("Score")
         ax.axhline(1/9, color=COLORS["bad"],  linestyle="--", linewidth=1.2, label="Random (1/9)")
         ax.axhline(0.5, color=COLORS["good"], linestyle=":",  linewidth=1.2, label="Target (0.5)")
         for bar, val in zip(bars, [bv, fv]):
-            ax.text(bar.get_x() + bar.get_width()/2, val + 0.02,
-                    f"{val:.2%}", ha="center", va="bottom", fontsize=11, fontweight="bold")
+            ax.text(
+                bar.get_x() + bar.get_width() / 2, val + 0.02,
+                f"{val:.2%}", ha="center", va="bottom", fontsize=11, fontweight="bold",
+            )
         delta = fv - bv
-        ax.text(0.5, 0.92, f"Δ {delta:+.2%}", transform=ax.transAxes,
-                ha="center", fontsize=11, fontweight="bold",
-                color=COLORS["good"] if delta >= 0 else COLORS["bad"])
+        ax.text(
+            0.5, 0.92, f"Δ {delta:+.2%}", transform=ax.transAxes,
+            ha="center", fontsize=11, fontweight="bold",
+            color=COLORS["good"] if delta >= 0 else COLORS["bad"],
+        )
         ax.legend(fontsize=8)
     plt.tight_layout()
     fig.savefig(out_dir / "metric_comparison_bar.png", dpi=150, bbox_inches="tight")
@@ -301,16 +340,20 @@ def plot_comparison(base_res: dict, ft_res: dict, out_dir: Path):
     ft_tious = [r["tiou"]    for r in ft_res["per_clip"]]
     x        = np.arange(len(clips))
 
-    fig, ax = plt.subplots(figsize=(max(10, len(clips)*0.6), 5))
+    fig, ax = plt.subplots(figsize=(max(10, len(clips) * 0.6), 5))
     ax.plot(x, b_tious,  "o--", color=COLORS["base"],      label="Base",       linewidth=1.5, markersize=6)
     ax.plot(x, ft_tious, "s-",  color=COLORS["finetuned"], label="Fine-tuned", linewidth=2,   markersize=7)
     ax.axhline(0.5, color=COLORS["accent"], linestyle="--", linewidth=1.5, label="tIoU@0.5 threshold")
-    ax.fill_between(x, b_tious, ft_tious,
-                    where=[f >  b for b, f in zip(b_tious, ft_tious)],
-                    alpha=0.15, color=COLORS["good"], label="FT improves")
-    ax.fill_between(x, b_tious, ft_tious,
-                    where=[f <= b for b, f in zip(b_tious, ft_tious)],
-                    alpha=0.15, color=COLORS["bad"],  label="Base wins")
+    ax.fill_between(
+        x, b_tious, ft_tious,
+        where=[f >  b for b, f in zip(b_tious, ft_tious)],
+        alpha=0.15, color=COLORS["good"], label="FT improves",
+    )
+    ax.fill_between(
+        x, b_tious, ft_tious,
+        where=[f <= b for b, f in zip(b_tious, ft_tious)],
+        alpha=0.15, color=COLORS["bad"], label="Base wins",
+    )
     ax.set_xticks(x)
     ax.set_xticklabels([c.split("_")[-1] for c in clips], rotation=45, ha="right", fontsize=7)
     ax.set_ylim(0, 1.05)
@@ -324,7 +367,6 @@ def plot_comparison(base_res: dict, ft_res: dict, out_dir: Path):
     print("  ✅ Saved tiou_per_clip.png")
 
     # ── 3. Per-op accuracy ────────────────────────────────────────────────
-    from collections import defaultdict
     ops = sorted(set(r["gt_op"] for r in base_res["per_clip"] + ft_res["per_clip"]))
 
     def op_accuracy(per_clip):
@@ -332,7 +374,7 @@ def plot_comparison(base_res: dict, ft_res: dict, out_dir: Path):
         for r in per_clip:
             total[r["gt_op"]]   += 1
             correct[r["gt_op"]] += r["oca_ok"]
-        return {op: correct[op]/total[op] if total[op] else 0 for op in ops}
+        return {op: correct[op] / total[op] if total[op] else 0 for op in ops}
 
     b_acc  = op_accuracy(base_res["per_clip"])
     ft_acc = op_accuracy(ft_res["per_clip"])
@@ -355,9 +397,9 @@ def plot_comparison(base_res: dict, ft_res: dict, out_dir: Path):
     print("  ✅ Saved oca_per_operation.png")
 
     # ── 4. Radar chart ────────────────────────────────────────────────────
-    labels  = ["OCA", "tIoU@0.5", "AA@1"]
-    angles  = np.linspace(0, 2*np.pi, len(labels), endpoint=False).tolist()
-    angles += angles[:1]
+    labels    = ["OCA", "tIoU@0.5", "AA@1"]
+    angles    = np.linspace(0, 2 * np.pi, len(labels), endpoint=False).tolist()
+    angles   += angles[:1]
     b_vals_r  = [base_res["aggregate"][m] for m in labels] + [base_res["aggregate"][labels[0]]]
     ft_vals_r = [ft_res["aggregate"][m]   for m in labels] + [ft_res["aggregate"][labels[0]]]
 
@@ -377,33 +419,41 @@ def plot_comparison(base_res: dict, ft_res: dict, out_dir: Path):
 
     # ── 5. Dashboard ──────────────────────────────────────────────────────
     fig = plt.figure(figsize=(16, 10))
-    fig.suptitle("OpenPack VLM Evaluation Dashboard\nBase vs QLoRA Fine-Tuned (Qwen2-VL-2B)",
-                 fontsize=14, fontweight="bold")
+    fig.suptitle(
+        "OpenPack VLM Evaluation Dashboard\nBase vs QLoRA Fine-Tuned (Qwen2-VL-2B)",
+        fontsize=14, fontweight="bold",
+    )
     gs = GridSpec(2, 3, figure=fig, hspace=0.45, wspace=0.38)
 
     ax1 = fig.add_subplot(gs[0, 0])
     xp  = np.arange(len(metrics))
     ax1.bar(xp - 0.2, b_vals, 0.38, color=COLORS["base"],      label="Base")
     ax1.bar(xp + 0.2, f_vals, 0.38, color=COLORS["finetuned"], label="Fine-tuned")
-    ax1.set_xticks(xp); ax1.set_xticklabels(metrics)
-    ax1.set_ylim(0, 1); ax1.legend(fontsize=8)
+    ax1.set_xticks(xp)
+    ax1.set_xticklabels(metrics)
+    ax1.set_ylim(0, 1)
+    ax1.legend(fontsize=8)
     ax1.set_title("Aggregate Metrics", fontweight="bold")
     for xi, (bv, fv) in enumerate(zip(b_vals, f_vals)):
-        ax1.text(xi-0.2, bv+0.02, f"{bv:.0%}", ha="center", fontsize=7)
-        ax1.text(xi+0.2, fv+0.02, f"{fv:.0%}", ha="center", fontsize=7,
+        ax1.text(xi - 0.2, bv + 0.02, f"{bv:.0%}", ha="center", fontsize=7)
+        ax1.text(xi + 0.2, fv + 0.02, f"{fv:.0%}", ha="center", fontsize=7,
                  color=COLORS["finetuned"], fontweight="bold")
 
-    ax2     = fig.add_subplot(gs[0, 1])
-    deltas  = [fv - bv for bv, fv in zip(b_vals, f_vals)]
-    ax2.bar(metrics, deltas,
-            color=[COLORS["good"] if d >= 0 else COLORS["bad"] for d in deltas],
-            edgecolor="white")
+    ax2    = fig.add_subplot(gs[0, 1])
+    deltas = [fv - bv for bv, fv in zip(b_vals, f_vals)]
+    ax2.bar(
+        metrics, deltas,
+        color=[COLORS["good"] if d >= 0 else COLORS["bad"] for d in deltas],
+        edgecolor="white",
+    )
     ax2.axhline(0, color="black", linewidth=0.8)
     ax2.set_title("Delta (FT − Base)", fontweight="bold")
     ax2.set_ylabel("Improvement")
     for i, d in enumerate(deltas):
-        ax2.text(i, d + (0.005 if d >= 0 else -0.015),
-                 f"{d:+.2%}", ha="center", fontsize=9, fontweight="bold")
+        ax2.text(
+            i, d + (0.005 if d >= 0 else -0.015),
+            f"{d:+.2%}", ha="center", fontsize=9, fontweight="bold",
+        )
 
     ax3 = fig.add_subplot(gs[0, 2], polar=True)
     ax3.plot(angles, b_vals_r,  "o-", color=COLORS["base"],      linewidth=1.5, label="Base")
@@ -420,12 +470,16 @@ def plot_comparison(base_res: dict, ft_res: dict, out_dir: Path):
     ax4.plot(x2, b_tious,  "o--", color=COLORS["base"],      label="Base",       linewidth=1.5, markersize=5)
     ax4.plot(x2, ft_tious, "s-",  color=COLORS["finetuned"], label="Fine-tuned", linewidth=2,   markersize=6)
     ax4.axhline(0.5, color=COLORS["accent"], linestyle="--", linewidth=1.2, label="0.5 threshold")
-    ax4.fill_between(x2, b_tious, ft_tious,
-                     where=[f > b for b, f in zip(b_tious, ft_tious)],
-                     alpha=0.12, color=COLORS["good"])
+    ax4.fill_between(
+        x2, b_tious, ft_tious,
+        where=[f > b for b, f in zip(b_tious, ft_tious)],
+        alpha=0.12, color=COLORS["good"],
+    )
     ax4.set_xticks(x2)
     ax4.set_xticklabels([c.split("_")[-1] for c in clips], rotation=45, ha="right", fontsize=7)
-    ax4.set_ylim(0, 1.05); ax4.set_ylabel("tIoU"); ax4.legend(fontsize=9)
+    ax4.set_ylim(0, 1.05)
+    ax4.set_ylabel("tIoU")
+    ax4.legend(fontsize=9)
     ax4.set_title("Per-Clip tIoU", fontweight="bold")
 
     fig.savefig(out_dir / "dashboard.png", dpi=150, bbox_inches="tight")
@@ -438,14 +492,42 @@ def plot_comparison(base_res: dict, ft_res: dict, out_dir: Path):
 # ──────────────────────────────────────────────────────────────────────────────
 def load_pairs(dataset_path: Path, frames_path: Path, max_clips: int = 20) -> list:
     pairs = []
-    for json_file in sorted(dataset_path.glob("sample_*.json"))[:max_clips]:
+    json_files = sorted(dataset_path.glob("sample_*.json"))[:max_clips]
+
+    if not json_files:
+        raise FileNotFoundError(
+            f"No sample_*.json files found in {dataset_path}. "
+            "Check that DATASET_PATH is correct."
+        )
+
+    for json_file in json_files:
         with open(json_file) as f:
             pair = json.load(f)
-        pair["sampled_frame_paths"] = [
-            str(frames_path / Path(fp.replace("\\", "/")).name)
-            for fp in pair["sampled_frame_paths"]
-        ]
+
+        # FIX 3: Reconstruct frame paths and verify existence
+        resolved_paths = []
+        for fp in pair["sampled_frame_paths"]:
+            # Normalise Windows backslashes
+            clean = fp.replace("\\", "/")
+            # Try direct path first, then filename-only under frames_path
+            candidates = [Path(clean), frames_path / Path(clean).name]
+            found = next((c for c in candidates if c.exists()), None)
+            if found:
+                resolved_paths.append(str(found))
+            else:
+                print(f"  ⚠️  Frame missing for {pair.get('clip_id','?')}: {fp}")
+
+        pair["sampled_frame_paths"] = resolved_paths
         pairs.append(pair)
+
+    # FIX 6: Warn on duplicate clip IDs (causes confusing per-clip charts)
+    ids = [p["clip_id"] for p in pairs]
+    seen = set()
+    for cid in ids:
+        if cid in seen:
+            print(f"  ⚠️  Duplicate clip_id detected: {cid}")
+        seen.add(cid)
+
     print(f"Loaded {len(pairs)} evaluation pairs")
     return pairs
 
@@ -456,9 +538,9 @@ def load_pairs(dataset_path: Path, frames_path: Path, max_clips: int = 20) -> li
 def main():
     DATASET_PATH         = Path("/kaggle/input/datasets/arnavmishra6996/vlm-qlora-dataset/training_data_samples")
     FRAMES_PATH          = Path("/kaggle/input/datasets/arnavmishra6996/vlm-qlora-dataset/S0500")
-    FINETUNED_CHECKPOINT = "/kaggle/working/checkpoints/final"
+    FINETUNED_CHECKPOINT = "/kaggle/input/models/arnavmishra6996/vlm-finetuned/pytorch/1/1/checkpoints/final"
     OUTPUT_DIR           = Path("/kaggle/working/eval_results")
-    MAX_CLIPS            = 20
+    MAX_CLIPS            = 4
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -495,16 +577,16 @@ def main():
     plot_comparison(base_results, ft_results, OUTPUT_DIR)
 
     # ── Summary table ─────────────────────────────────────────────────────
-    print("\n" + "═"*52)
+    print("\n" + "═" * 52)
     print(f"{'Metric':<15} {'Base':>10} {'Fine-Tuned':>12} {'Delta':>10}")
-    print("─"*52)
+    print("─" * 52)
     for m in ["OCA", "tIoU@0.5", "AA@1"]:
         bv  = base_results["aggregate"][m]
         fv  = ft_results["aggregate"][m]
         d   = fv - bv
         sym = "▲" if d > 0 else "▼"
         print(f"{m:<15} {bv:>10.2%} {fv:>12.2%} {sym}{abs(d):>8.2%}")
-    print("═"*52)
+    print("═" * 52)
 
     aa_delta = ft_results["aggregate"]["AA@1"] - base_results["aggregate"]["AA@1"]
     if aa_delta > 0.10:
