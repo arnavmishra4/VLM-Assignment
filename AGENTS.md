@@ -49,7 +49,7 @@
 **Time of this prompt:** 22:24
 
 
-## Phase 3 — Dataset Research [Hour 12]
+## Phase 2 — Dataset Research [Hour 12]
 
 **Tool:** ChatGPT Deep Research
 **Request:** Find any publicly available pre-processed or pre-clipped versions of the OpenPack dataset with RGB frames and operation annotations, ready for VLM fine-tuning without downloading the full 400GB+ raw data. Searched HuggingFace Datasets, Kaggle Datasets, Zenodo, GitHub, and academic paper supplementary materials.
@@ -58,3 +58,21 @@
 **Modified:** N/A — research task, no code output
 **Time saved:** None (wasted 2 hours figuring out the dataset issue , decided to move on with Sample dataset creating sample scripts while trying to locally download one big file that i can clip and use for training)
 **Time of this prompt:** 03:48
+
+## Phase 3: PEFT Fine-Tuning
+
+### Interaction 1 — DataLoader / Dataset Class
+- **Tool used:** Claude (claude.ai)
+- **Request:** "Build a PyTorch Dataset class for OpenPack VLM fine-tuning that loads
+  JSON sample pairs, builds Qwen2-VL message format with image frames, applies chat
+  template, and returns tokenized inputs with labels"
+- **Code accepted:** `OpenPackDataset.__getitem__()`, `data_collator()` function,
+  `image_grid_thw` cat logic in collator
+- **Code modified by me:** Frame path resolution (Windows backslash fix), added
+  `.squeeze(0)` for batch dimension
+- **What I wrote myself:** LoRA config, QLoRA BitsAndBytes config, TrainingArguments,
+  W&B init and login, VRAM math cell
+- **Estimated time saved:** ~45 minutes
+- **Time of this prompt:** 8:00 
+
+---
