@@ -1,0 +1,168 @@
+{
+  "base_model": {
+    "OCA": 0.0,
+    "tIoU@0.5": 0.0,
+    "AA@1": 0.0
+  },
+  "finetuned_model": {
+    "OCA": 0.0,
+    "tIoU@0.5": 0.0,
+    "AA@1": 0.0
+  },
+  "per_clip_base": [
+    {
+      "clip_id": "U0209_S0500_mid_000014",
+      "gt_op": "Put Items",
+      "pred_op": "Packaging",
+      "gt_next": "Label",
+      "pred_next": "Pack",
+      "gt_seg": {
+        "start_frame": 0,
+        "end_frame": 14
+      },
+      "pred_seg": {
+        "start_frame": 14,
+        "end_frame": 20
+      },
+      "tiou": 0.0,
+      "oca_ok": 0,
+      "aa_ok": 0,
+      "confidence": 0.9
+    },
+    {
+      "clip_id": "U0209_S0500_boundary_000014",
+      "gt_op": "Put Items",
+      "pred_op": "Packaging",
+      "gt_next": "Label",
+      "pred_next": "Pack",
+      "gt_seg": {
+        "start_frame": 0,
+        "end_frame": 14
+      },
+      "pred_seg": {
+        "start_frame": 10,
+        "end_frame": 15
+      },
+      "tiou": 0.26666666666666666,
+      "oca_ok": 0,
+      "aa_ok": 0,
+      "confidence": 0.9
+    },
+    {
+      "clip_id": "U0209_S0500_mid_000014",
+      "gt_op": "Label",
+      "pred_op": "Packaging",
+      "gt_next": "Assemble Box",
+      "pred_next": "Pack",
+      "gt_seg": {
+        "start_frame": 0,
+        "end_frame": 14
+      },
+      "pred_seg": {
+        "start_frame": 14,
+        "end_frame": 20
+      },
+      "tiou": 0.0,
+      "oca_ok": 0,
+      "aa_ok": 0,
+      "confidence": 0.9
+    },
+    {
+      "clip_id": "U0209_S0500_boundary_000014",
+      "gt_op": "Label",
+      "pred_op": "Packaging",
+      "gt_next": "Assemble Box",
+      "pred_next": "Pack",
+      "gt_seg": {
+        "start_frame": 0,
+        "end_frame": 14
+      },
+      "pred_seg": {
+        "start_frame": 10,
+        "end_frame": 15
+      },
+      "tiou": 0.26666666666666666,
+      "oca_ok": 0,
+      "aa_ok": 0,
+      "confidence": 0.9
+    }
+  ],
+  "per_clip_ft": [
+    {
+      "clip_id": "U0209_S0500_mid_000014",
+      "gt_op": "Put Items",
+      "pred_op": "Packaging",
+      "gt_next": "Label",
+      "pred_next": "Pack",
+      "gt_seg": {
+        "start_frame": 0,
+        "end_frame": 14
+      },
+      "pred_seg": {
+        "start_frame": 14,
+        "end_frame": 20
+      },
+      "tiou": 0.0,
+      "oca_ok": 0,
+      "aa_ok": 0,
+      "confidence": 0.99
+    },
+    {
+      "clip_id": "U0209_S0500_boundary_000014",
+      "gt_op": "Put Items",
+      "pred_op": "Packaging",
+      "gt_next": "Label",
+      "pred_next": "Packaging",
+      "gt_seg": {
+        "start_frame": 0,
+        "end_frame": 14
+      },
+      "pred_seg": {
+        "start_frame": 14,
+        "end_frame": 20
+      },
+      "tiou": 0.0,
+      "oca_ok": 0,
+      "aa_ok": 0,
+      "confidence": 0.99
+    },
+    {
+      "clip_id": "U0209_S0500_mid_000014",
+      "gt_op": "Label",
+      "pred_op": "Packaging",
+      "gt_next": "Assemble Box",
+      "pred_next": "Pack",
+      "gt_seg": {
+        "start_frame": 0,
+        "end_frame": 14
+      },
+      "pred_seg": {
+        "start_frame": 14,
+        "end_frame": 20
+      },
+      "tiou": 0.0,
+      "oca_ok": 0,
+      "aa_ok": 0,
+      "confidence": 0.99
+    },
+    {
+      "clip_id": "U0209_S0500_boundary_000014",
+      "gt_op": "Label",
+      "pred_op": "Packaging",
+      "gt_next": "Assemble Box",
+      "pred_next": "Packaging",
+      "gt_seg": {
+        "start_frame": 0,
+        "end_frame": 14
+      },
+      "pred_seg": {
+        "start_frame": 14,
+        "end_frame": 20
+      },
+      "tiou": 0.0,
+      "oca_ok": 0,
+      "aa_ok": 0,
+      "confidence": 0.99
+    }
+  ]
+}
